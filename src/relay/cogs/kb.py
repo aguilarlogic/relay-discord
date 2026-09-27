@@ -54,15 +54,18 @@ class KBCog(commands.GroupCog, group_name="kb", group_description="Manage Relay'
     async def add(self, interaction: discord.Interaction) -> None:
         await interaction.response.send_modal(AddDocModal(self.bot))
 
-    @app_commands.command(name="upload", description="Import a .md or .txt file (Pro).")
+    @app_commands.command(name="upload", description="Import a .md or .txt file (paid plans).")
     @app_commands.describe(file="A .md or .txt file", title="Title (defaults to the file name)")
     async def upload(
         self, interaction: discord.Interaction, file: discord.Attachment, title: str | None = None
     ) -> None:
-        if not self.bot.plans.plan_for(interaction.guild_id).kb_upload:
+        plans = self.bot.plans
+        if not plans.tier_for(interaction.guild_id).kb_upload:
+            needed = plans.tiers.cheapest_with("kb_upload")
             await interaction.response.send_message(
-                "File import is a Pro feature. Use `/kb add` to paste text instead.",
-                view=self.bot.plans.upsell_view() or discord.utils.MISSING,
+                f"File import needs the {needed.name if needed else 'a paid'} plan or higher. "
+                "Use `/kb add` to paste text instead, or see `/relay plans`.",
+                view=plans.upsell_view(interaction.guild_id, include_topups=False) or discord.utils.MISSING,
                 ephemeral=True,
             )
             return

@@ -1,0 +1,87 @@
+# Relay's plans. Edit freely: prices, limits, and each tier's AI model.
+#
+# - Order matters: the FIRST tier is the free tier (no sku_id), later tiers
+#   rank higher. A server gets the highest tier it has an active subscription to.
+# - sku_id: create a *guild subscription* SKU per paid tier (and a *consumable*
+#   SKU per top-up) in the Discord Developer Portal -> Monetization, then paste
+#   the ids here. 0 = not on sale yet. While no paid tier has a sku_id, Relay
+#   runs self-hosted: every server gets the last tier with no answer limit.
+# - The real price is whatever you set on the SKU in Discord. price_label and
+#   monthly_price_usd are only shown to users and used by `relay costs`.
+# - monthly_answers counts every question Relay sends to the AI (even if the
+#   AI then declines). Questions with no matching docs cost nothing and are free.
+# - llm: "free" = the FREE_LLM_* provider from .env (e.g. Gemini's free API),
+#   or a Claude model id.
+#
+# AI cost per question (see `relay costs` for your real numbers):
+#   free provider $0 · claude-haiku-4-5 ~$0.003 typical, ~$0.007 worst case
+#   claude-sonnet-5 ~$0.007 typical, ~$0.014 worst case
+# The limits below keep a server that maxes out its allowance under ~60% of
+# its price even at worst-case cost (tests/test_tiers.py checks this).
+
+[[tier]]
+key = "free"
+name = "Free"
+price_label = "Free"
+monthly_answers = 50
+help_channels = 1
+llm = "free"
+digest = false
+kb_upload = false
+
+[[tier]]
+key = "starter"
+name = "Starter"
+sku_id = 0
+price_label = "$4.99/month"
+monthly_price_usd = 4.99
+monthly_answers = 300        # worst case ~$2.10 of Haiku
+help_channels = 2
+llm = "claude-haiku-4-5"
+digest = false
+kb_upload = true
+
+[[tier]]
+key = "pro"
+name = "Pro"
+sku_id = 0
+price_label = "$19.99/month"
+monthly_price_usd = 19.99
+monthly_answers = 750        # worst case ~$10.50 of Sonnet
+help_channels = 5
+llm = "claude-sonnet-5"
+digest = true
+kb_upload = true
+
+[[tier]]
+key = "business"
+name = "Business"
+sku_id = 0
+price_label = "$59.99/month"
+monthly_price_usd = 59.99
+monthly_answers = 2000       # worst case ~$28 of Sonnet
+help_channels = "unlimited"
+llm = "claude-sonnet-5"
+digest = true
+kb_upload = true
+
+# One-time packs for a server that runs out mid-month. Top-up answers never
+# expire and are used after the monthly allowance, on the server's tier model.
+[[topup]]
+sku_id = 0
+name = "+200 answers"
+price_label = "$4.99"
+answers = 200                # worst case ~$2.80 on Sonnet
+
+[[topup]]
+sku_id = 0
+name = "+1,000 answers"
+price_label = "$19.99"
+answers = 1000               # worst case ~$14 on Sonnet
+
+# USD per million tokens, used by `relay costs` to estimate spend.
+[prices]
+"free" = { input = 0.0, output = 0.0 }
+"claude-haiku-4-5" = { input = 1.0, output = 5.0 }
+"claude-sonnet-5" = { input = 2.0, output = 10.0 }
+"claude-opus-5" = { input = 5.0, output = 25.0 }

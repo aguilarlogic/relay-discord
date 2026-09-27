@@ -2,7 +2,7 @@ from datetime import UTC, datetime
 
 from relay.db import ANSWERED, DECLINED, ESCALATED, SOLVED, Question
 from relay.digest import build_digest, cluster_gaps, compute_stats, render_digest, render_stats
-from relay.llm import StructuredLLM
+from relay.llm import ClaudeLLM
 
 from .conftest import FakeAnthropic, json_response
 
@@ -37,16 +37,16 @@ def test_digest_lists_escalations_and_unanswered_with_links():
 
 async def test_cluster_gaps_skips_api_for_few_questions():
     fake = FakeAnthropic()
-    gaps = await cluster_gaps(StructuredLLM(fake, "claude-haiku-4-5"), [q(1, DECLINED), q(2, DECLINED)])
-    assert len(gaps) == 2 and fake.messages.calls == []
+    gaps, usage = await cluster_gaps(ClaudeLLM(fake, "claude-haiku-4-5"), [q(1, DECLINED), q(2, DECLINED)])
+    assert len(gaps) == 2 and usage is None and fake.messages.calls == []
 
 
 async def test_cluster_gaps_uses_model_and_falls_back_on_error():
     declined = [q(i, DECLINED, f"question {i} about billing") for i in range(5)]
     fake = FakeAnthropic(json_response({"topics": [{"topic": "Billing FAQ", "count": 5, "example": "billing?"}]}))
-    gaps = await cluster_gaps(StructuredLLM(fake, "claude-haiku-4-5"), declined)
-    assert gaps[0].topic == "Billing FAQ" and gaps[0].count == 5
+    gaps, usage = await cluster_gaps(ClaudeLLM(fake, "claude-haiku-4-5"), declined)
+    assert gaps[0].topic == "Billing FAQ" and gaps[0].count == 5 and usage.input_tokens == 1000
 
     broken = FakeAnthropic(json_response({}, stop_reason="refusal"))
-    gaps = await cluster_gaps(StructuredLLM(broken, "claude-haiku-4-5"), declined)
-    assert len(gaps) == 5
+    gaps, usage = await cluster_gaps(ClaudeLLM(broken, "claude-haiku-4-5"), declined)
+    assert len(gaps) == 5 and usage is None

@@ -74,3 +74,24 @@ async def test_usage_increments_per_month(db):
     await db.increment_usage(1, "2026-09")
     assert await db.increment_usage(1, "2026-09") == 2
     assert await db.usage_for(1, "2026-10") == 0
+
+
+async def test_redeem_entitlement_is_idempotent_and_spend_stops_at_zero(db):
+    now = datetime(2026, 9, 27, tzinfo=UTC)
+    assert await db.redeem_entitlement(77, 1, 2, now)
+    assert not await db.redeem_entitlement(77, 1, 2, now)
+    assert await db.credit_balance(1) == 2
+    assert await db.spend_credit(1) and await db.spend_credit(1)
+    assert not await db.spend_credit(1)
+    assert await db.credit_balance(1) == 0
+    assert not await db.spend_credit(999)
+
+
+async def test_llm_call_purge(db):
+    now = datetime(2026, 9, 27, tzinfo=UTC)
+    for when in (now, now - timedelta(days=200)):
+        await db.log_llm_call(
+            guild_id=1, tier="free", llm="free", purpose="answer", input_tokens=1, output_tokens=1, now=when
+        )
+    assert await db.purge_llm_calls_before(now - timedelta(days=120)) == 1
+    assert len(await db.llm_usage_since(now - timedelta(days=365))) == 1

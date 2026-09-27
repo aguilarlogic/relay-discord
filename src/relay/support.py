@@ -8,10 +8,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
-from relay.answer import Answerer, AnswerResult
+from relay.answer import AnswerResult, answer_question
 from relay.db import ANSWERED, DECLINED, Database
 from relay.kb import KnowledgeBase
-from relay.llm import LLMError
+from relay.llm import LLMError, LLMRouter
 from relay.plans import PlanService
 
 logger = logging.getLogger(__name__)
@@ -22,9 +22,9 @@ USER_COOLDOWN_SECONDS = 60.0
 
 class Outcome(StrEnum):
     COOLDOWN = "cooldown"  # same user asked too recently; nothing recorded
-    LIMITED = "limited"  # free-tier monthly limit reached; nothing recorded
+    LIMITED = "limited"  # monthly allowance and top-ups used up; nothing recorded
     DECLINED = "declined"  # no KB match or model said it can't answer; recorded
-    ERROR = "error"  # Claude API failure; recorded as declined so staff see it
+    ERROR = "error"  # AI provider failure or quota; recorded as declined so staff see it
     ANSWERED = "answered"
 
 
@@ -41,11 +41,11 @@ def looks_like_question(text: str) -> bool:
 
 
 class SupportService:
-    def __init__(self, db: Database, kb: KnowledgeBase, answerer: Answerer, plans: PlanService) -> None:
+    def __init__(self, db: Database, kb: KnowledgeBase, plans: PlanService, router: LLMRouter) -> None:
         self.db = db
         self.kb = kb
-        self.answerer = answerer
         self.plans = plans
+        self.router = router
         self._last_asked: dict[tuple[int, int], float] = {}
 
     def _on_cooldown(self, guild_id: int, user_id: int, now: datetime) -> bool:
@@ -73,20 +73,35 @@ class SupportService:
         if self._on_cooldown(guild_id, user_id, now):
             return HandleResult(Outcome.COOLDOWN)
 
-        remaining = await self.plans.remaining_answers(guild_id, now)
-        if remaining == 0:
+        allowance = await self.plans.allowance(guild_id, now)
+        if allowance.remaining == 0:
             return HandleResult(Outcome.LIMITED)
 
         common = dict(guild_id=guild_id, channel_id=channel_id, message_id=message_id, user_id=user_id)
+        # No matching docs means no AI call, so it's free and not metered.
         chunks = await self.kb.search(guild_id, text)
         outcome = Outcome.DECLINED
         result: AnswerResult | None = None
         if chunks:
+            tier = self.plans.tier_for(guild_id)
             try:
-                result = await self.answerer.answer(text, chunks)
+                result, usage = await answer_question(self.router.get(tier.llm), text, chunks)
             except LLMError:
-                logger.exception("answering failed in guild %s", guild_id)
+                logger.exception("answering failed in guild %s (tier %s)", guild_id, tier.key)
                 outcome = Outcome.ERROR
+            else:
+                # Every completed AI call is metered, including ones where the
+                # model declines -- they cost the same.
+                await self.plans.consume(guild_id, now)
+                await self.db.log_llm_call(
+                    guild_id=guild_id,
+                    tier=tier.key,
+                    llm=tier.llm,
+                    purpose="answer",
+                    input_tokens=usage.input_tokens,
+                    output_tokens=usage.output_tokens,
+                    now=now,
+                )
 
         if result is None or not result.answerable:
             qid = await self.db.record_question(**common, text=text, status=DECLINED, now=now)
@@ -95,7 +110,6 @@ class SupportService:
         qid = await self.db.record_question(
             **common, text=text, status=ANSWERED, source_doc_ids=result.source_doc_ids, now=now
         )
-        await self.plans.record_answer(guild_id, now)
         titles_by_id = await self.kb.doc_titles(guild_id, list(result.source_doc_ids))
         titles = tuple(titles_by_id[d] for d in result.source_doc_ids if d in titles_by_id)
         return HandleResult(Outcome.ANSWERED, question_id=qid, answer=result, source_titles=titles)

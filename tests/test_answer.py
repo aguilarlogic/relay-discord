@@ -2,9 +2,9 @@ import anthropic
 import httpx2
 import pytest
 
-from relay.answer import MAX_ANSWER_CHARS, Answerer, build_user_prompt, parse_answer
+from relay.answer import MAX_ANSWER_CHARS, answer_question, build_user_prompt, parse_answer
 from relay.kb import Chunk
-from relay.llm import LLMError, StructuredLLM
+from relay.llm import ClaudeLLM, LLMError, LLMRouter, parse_json_object
 
 from .conftest import FakeAnthropic, json_response
 
@@ -32,11 +32,25 @@ def test_parse_answer_truncates_long_text():
     assert len(result.text) == MAX_ANSWER_CHARS
 
 
-async def test_answer_happy_path_and_request_shape():
+@pytest.mark.parametrize(
+    "text",
+    ['{"a": 1}', '```json\n{"a": 1}\n```', 'Sure! Here you go: {"a": 1} Hope that helps.'],
+)
+def test_parse_json_object_tolerates_wrappers(text):
+    assert parse_json_object(text) == {"a": 1}
+
+
+@pytest.mark.parametrize("text", ["no json here", "[1, 2]", "{broken"])
+def test_parse_json_object_rejects_garbage(text):
+    with pytest.raises(LLMError):
+        parse_json_object(text)
+
+
+async def test_answer_happy_path_request_shape_and_usage():
     fake = FakeAnthropic(json_response({"answerable": True, "answer": "Within 14 days.", "source_ids": [1]}))
-    answerer = Answerer(StructuredLLM(fake, "claude-opus-5", effort="medium"))
-    result = await answerer.answer("refund?", CHUNKS)
+    result, usage = await answer_question(ClaudeLLM(fake, "claude-opus-5", effort="medium"), "refund?", CHUNKS)
     assert result.text == "Within 14 days." and result.source_doc_ids == (10,)
+    assert (usage.input_tokens, usage.output_tokens) == (1000, 200)
 
     call = fake.messages.calls[0]
     assert call["model"] == "claude-opus-5"
@@ -48,28 +62,33 @@ async def test_answer_happy_path_and_request_shape():
 
 async def test_no_effort_or_fallback_for_haiku():
     fake = FakeAnthropic(json_response({"topics": []}))
-    llm = StructuredLLM(fake, "claude-haiku-4-5", effort="medium")
-    await llm.call(system="s", user="u", schema={})
+    await ClaudeLLM(fake, "claude-haiku-4-5", effort="medium").call(system="s", user="u", schema={})
     call = fake.messages.calls[0]
     assert "effort" not in call["output_config"] and "extra_body" not in call
 
 
-async def test_answer_without_chunks_skips_api():
-    fake = FakeAnthropic()
-    result = await Answerer(StructuredLLM(fake, "claude-opus-5")).answer("q", [])
-    assert not result.answerable and fake.messages.calls == []
+async def test_answer_requires_chunks():
+    with pytest.raises(ValueError):
+        await answer_question(ClaudeLLM(FakeAnthropic(), "claude-opus-5"), "q", [])
 
 
 @pytest.mark.parametrize("stop_reason", ["refusal", "max_tokens"])
 async def test_bad_stop_reasons_raise(stop_reason):
     fake = FakeAnthropic(json_response({}, stop_reason=stop_reason))
     with pytest.raises(LLMError):
-        await StructuredLLM(fake, "claude-opus-5").call(system="s", user="u", schema={})
+        await ClaudeLLM(fake, "claude-opus-5").call(system="s", user="u", schema={})
 
 
 async def test_api_errors_become_llm_errors():
     request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
-    err = anthropic.APIConnectionError(request=request)
-    fake = FakeAnthropic(err)
+    fake = FakeAnthropic(anthropic.APIConnectionError(request=request))
     with pytest.raises(LLMError):
-        await StructuredLLM(fake, "claude-opus-5").call(system="s", user="u", schema={})
+        await ClaudeLLM(fake, "claude-opus-5").call(system="s", user="u", schema={})
+
+
+def test_router_caches_claude_models_and_requires_free_config():
+    router = LLMRouter(FakeAnthropic(), None)
+    assert router.get("claude-sonnet-5") is router.get("claude-sonnet-5")
+    assert router.get("claude-haiku-4-5").model == "claude-haiku-4-5"
+    with pytest.raises(LLMError):
+        router.get("free")

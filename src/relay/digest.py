@@ -11,7 +11,7 @@ import logging
 from dataclasses import dataclass, field
 
 from relay.db import ANSWERED, DECLINED, ESCALATED, SOLVED, Question
-from relay.llm import LLMError, StructuredLLM
+from relay.llm import LLMClient, LLMError, LLMResult
 
 logger = logging.getLogger(__name__)
 
@@ -104,20 +104,21 @@ GAP_SCHEMA = {
 }
 
 
-async def cluster_gaps(llm: StructuredLLM, declined: list[Question]) -> list[GapTopic]:
+async def cluster_gaps(llm: LLMClient, declined: list[Question]) -> tuple[list[GapTopic], LLMResult | None]:
+    """Returns the topics and the call's usage (None when no call was made)."""
     if len(declined) < 3:
         # Not worth an API call -- just list them as-is.
-        return [GapTopic(topic=_clip(q.text, 80), count=1, example=_clip(q.text, 120)) for q in declined]
+        return [GapTopic(topic=_clip(q.text, 80), count=1, example=_clip(q.text, 120)) for q in declined], None
     lines = "\n".join(f"- {_clip(q.text, 300)}" for q in declined[-MAX_GAP_QUESTIONS:])
     try:
-        data = await llm.call(
+        result = await llm.call(
             system=GAP_SYSTEM, user=f"<questions>\n{lines}\n</questions>", schema=GAP_SCHEMA, max_tokens=2000
         )
     except LLMError:
         logger.exception("gap clustering failed; falling back to a raw list")
-        return [GapTopic(topic=_clip(q.text, 80), count=1, example=_clip(q.text, 120)) for q in declined[:6]]
+        return [GapTopic(topic=_clip(q.text, 80), count=1, example=_clip(q.text, 120)) for q in declined[:6]], None
     topics = []
-    for t in data.get("topics", [])[:6]:
+    for t in result.data.get("topics", [])[:6]:
         if isinstance(t, dict) and t.get("topic"):
             topics.append(
                 GapTopic(
@@ -126,7 +127,7 @@ async def cluster_gaps(llm: StructuredLLM, declined: list[Question]) -> list[Gap
                     example=_clip(str(t.get("example", "")), 120),
                 )
             )
-    return topics
+    return topics, result
 
 
 def build_digest(questions: list[Question]) -> Digest:

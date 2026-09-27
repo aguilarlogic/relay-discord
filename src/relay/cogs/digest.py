@@ -16,6 +16,7 @@ from relay.digest import build_digest, cluster_gaps, render_digest
 logger = logging.getLogger(__name__)
 
 RETENTION_DAYS = 30
+CALL_LOG_RETENTION_DAYS = 120
 
 
 async def make_digest(bot: RelayBot, guild_id: int, now: datetime) -> str:
@@ -23,7 +24,17 @@ async def make_digest(bot: RelayBot, guild_id: int, now: datetime) -> str:
     digest = build_digest(questions)
     declined = [q for q in questions if q.status == DECLINED]
     if declined:
-        digest.gaps = await cluster_gaps(bot.fast_llm, declined)
+        digest.gaps, usage = await cluster_gaps(bot.fast_llm, declined)
+        if usage is not None:
+            await bot.db.log_llm_call(
+                guild_id=guild_id,
+                tier=bot.plans.tier_for(guild_id).key,
+                llm=bot.fast_llm.model,
+                purpose="digest",
+                input_tokens=usage.input_tokens,
+                output_tokens=usage.output_tokens,
+                now=now,
+            )
     return render_digest(digest, guild_id)
 
 
@@ -46,7 +57,7 @@ class DigestCog(commands.Cog):
                 cfg.digest_channel_id is None
                 or cfg.digest_hour_utc != now.hour
                 or cfg.last_digest_date == today
-                or not self.bot.plans.plan_for(cfg.guild_id).digest
+                or not self.bot.plans.tier_for(cfg.guild_id).digest
             ):
                 continue
             guild = self.bot.get_guild(cfg.guild_id)
@@ -66,6 +77,8 @@ class DigestCog(commands.Cog):
         purged = await self.bot.db.purge_questions_before(now - timedelta(days=RETENTION_DAYS))
         if purged:
             logger.info("purged %d questions older than %d days", purged, RETENTION_DAYS)
+        # Token logs hold no message content; keep them longer for cost reports.
+        await self.bot.db.purge_llm_calls_before(now - timedelta(days=CALL_LOG_RETENTION_DAYS))
         try:
             await self.bot.plans.refresh(self.bot, now)
         except discord.HTTPException:
@@ -76,14 +89,16 @@ class DigestCog(commands.Cog):
     async def _wait_ready(self) -> None:
         await self.bot.wait_until_ready()
 
-    @app_commands.command(name="digest-now", description="Preview today's staff digest (Pro).")
+    @app_commands.command(name="digest-now", description="Preview today's staff digest (paid plans).")
     @app_commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
     async def digest_now(self, interaction: discord.Interaction) -> None:
-        if not self.bot.plans.plan_for(interaction.guild_id).digest:
+        plans = self.bot.plans
+        if not plans.tier_for(interaction.guild_id).digest:
+            needed = plans.tiers.cheapest_with("digest")
             await interaction.response.send_message(
-                "The daily digest is a Pro feature.",
-                view=self.bot.plans.upsell_view() or discord.utils.MISSING,
+                f"The daily digest needs the {needed.name if needed else 'a paid'} plan or higher. See `/relay plans`.",
+                view=plans.upsell_view(interaction.guild_id, include_topups=False) or discord.utils.MISSING,
                 ephemeral=True,
             )
             return

@@ -65,6 +65,31 @@ MIGRATIONS: list[str] = [
         PRIMARY KEY (guild_id, month)
     );
     """,
+    # 2: multi-tier billing -- top-up credits, idempotent entitlement
+    # redemption, and per-call token logging for cost reports
+    """
+    CREATE TABLE credits (
+        guild_id INTEGER PRIMARY KEY,
+        balance INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE TABLE processed_entitlements (
+        entitlement_id INTEGER PRIMARY KEY,
+        guild_id INTEGER NOT NULL,
+        answers INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE TABLE llm_calls (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        guild_id INTEGER NOT NULL,
+        tier TEXT NOT NULL,
+        llm TEXT NOT NULL,
+        purpose TEXT NOT NULL,
+        input_tokens INTEGER NOT NULL,
+        output_tokens INTEGER NOT NULL,
+        created_at TEXT NOT NULL
+    );
+    CREATE INDEX llm_calls_created ON llm_calls (created_at);
+    """,
 ]
 
 # Question lifecycle. "answered" is the state right after the bot posts; the
@@ -289,3 +314,71 @@ class Database:
         )
         await self.conn.commit()
         return await self.usage_for(guild_id, month)
+
+    # --- top-up credits ----------------------------------------------------
+
+    async def credit_balance(self, guild_id: int) -> int:
+        async with self.conn.execute("SELECT balance FROM credits WHERE guild_id = ?", (guild_id,)) as cur:
+            row = await cur.fetchone()
+        return row["balance"] if row else 0
+
+    async def redeem_entitlement(self, entitlement_id: int, guild_id: int, answers: int, now: datetime) -> bool:
+        """Add a top-up's answers to a guild exactly once per entitlement.
+        Returns False if this entitlement was already redeemed."""
+        cur = await self.conn.execute(
+            "INSERT OR IGNORE INTO processed_entitlements (entitlement_id, guild_id, answers, created_at)"
+            " VALUES (?, ?, ?, ?)",
+            (entitlement_id, guild_id, answers, iso(now)),
+        )
+        if cur.rowcount == 0:
+            await self.conn.commit()
+            return False
+        await self.conn.execute(
+            "INSERT INTO credits (guild_id, balance) VALUES (?, ?)"
+            " ON CONFLICT (guild_id) DO UPDATE SET balance = balance + excluded.balance",
+            (guild_id, answers),
+        )
+        await self.conn.commit()
+        return True
+
+    async def spend_credit(self, guild_id: int) -> bool:
+        cur = await self.conn.execute(
+            "UPDATE credits SET balance = balance - 1 WHERE guild_id = ? AND balance > 0", (guild_id,)
+        )
+        await self.conn.commit()
+        return cur.rowcount > 0
+
+    # --- AI call log -------------------------------------------------------
+
+    async def log_llm_call(
+        self,
+        *,
+        guild_id: int,
+        tier: str,
+        llm: str,
+        purpose: str,
+        input_tokens: int,
+        output_tokens: int,
+        now: datetime | None = None,
+    ) -> None:
+        await self.conn.execute(
+            "INSERT INTO llm_calls (guild_id, tier, llm, purpose, input_tokens, output_tokens, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (guild_id, tier, llm, purpose, input_tokens, output_tokens, iso(now or utcnow())),
+        )
+        await self.conn.commit()
+
+    async def llm_usage_since(self, since: datetime) -> list[dict]:
+        """Per (tier, llm): calls, distinct guilds, and token totals."""
+        async with self.conn.execute(
+            "SELECT tier, llm, COUNT(*) AS calls, COUNT(DISTINCT guild_id) AS guilds,"
+            " SUM(input_tokens) AS input_tokens, SUM(output_tokens) AS output_tokens"
+            " FROM llm_calls WHERE created_at >= ? GROUP BY tier, llm ORDER BY tier, llm",
+            (iso(since),),
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def purge_llm_calls_before(self, cutoff: datetime) -> int:
+        cur = await self.conn.execute("DELETE FROM llm_calls WHERE created_at < ?", (iso(cutoff),))
+        await self.conn.commit()
+        return cur.rowcount

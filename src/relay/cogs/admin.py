@@ -11,7 +11,7 @@ from discord.ext import commands
 from relay.bot import RelayBot
 from relay.db import utcnow
 from relay.digest import compute_stats, render_stats
-from relay.plans import month_key
+from relay.tiers import FREE_LLM, Tier, TierConfig
 
 HelpChannel = discord.TextChannel | discord.ForumChannel
 
@@ -22,6 +22,38 @@ REQUIRED_PERMS = {
     "send_messages_in_threads": "Send Messages in Threads",
     "create_public_threads": "Create Public Threads",
 }
+
+
+FREE_TIER_NOTE = (
+    "-# The Free plan answers with a free third-party AI API whose provider may use requests to improve "
+    "its models. Paid plans use Claude."
+)
+
+
+def _limit(n: int | None, unit: str, singular: str | None = None) -> str:
+    if n is None:
+        return f"Unlimited {unit}"
+    return f"{n:,} {singular if n == 1 and singular else unit}"
+
+
+def render_plans(tiers: TierConfig, current: Tier) -> str:
+    lines = ["**Relay plans**"]
+    for t in tiers.tier:
+        if t.key != tiers.free.key and not t.sku_id:
+            continue  # not on sale
+        extras = [x for x, on in (("daily staff digest", t.digest), ("file import", t.kb_upload)) if on]
+        marker = " ← current" if t.key == current.key else ""
+        features = [
+            _limit(t.monthly_answers, "AI answers/month"),
+            _limit(t.help_channels, "help channels", "help channel"),
+            *extras,
+        ]
+        lines.append(f"**{t.name}** · {t.price_label or 'Free'}{marker}\n-# " + " · ".join(features))
+    packs = tiers.purchasable_topups()
+    if packs:
+        lines.append("**Answer packs** (one-time, never expire; run `/relay redeem` after buying)")
+        lines.append("-# " + " · ".join(f"{p.name} for {p.price_label}" for p in packs))
+    return "\n".join(lines)[:2000]
 
 
 def missing_permissions(channel: HelpChannel, me: discord.Member) -> list[str]:
@@ -66,12 +98,13 @@ class AdminCog(commands.GroupCog, group_name="relay", group_description="Configu
     async def channel_add(self, interaction: discord.Interaction, channel: HelpChannel) -> None:
         guild_id = interaction.guild_id
         current = await self.bot.db.help_channel_ids(guild_id)
-        limit = self.bot.plans.plan_for(guild_id).max_help_channels
+        tier = self.bot.plans.tier_for(guild_id)
+        limit = tier.help_channels
         if channel.id not in current and limit is not None and len(current) >= limit:
             await interaction.response.send_message(
-                f"The Free plan covers {limit} help channel. Remove one with `/relay channel-remove` "
-                "or upgrade to Pro for unlimited channels.",
-                view=self.bot.plans.upsell_view() or discord.utils.MISSING,
+                f"The {tier.name} plan covers {limit} help channel{'s' * (limit != 1)}. Remove one with "
+                "`/relay channel-remove`, or upgrade for more (see `/relay plans`).",
+                view=self.bot.plans.upsell_view(guild_id, include_topups=False) or discord.utils.MISSING,
                 ephemeral=True,
             )
             return
@@ -96,28 +129,58 @@ class AdminCog(commands.GroupCog, group_name="relay", group_description="Configu
     async def status(self, interaction: discord.Interaction) -> None:
         guild = interaction.guild
         cfg = await self.bot.db.get_guild_config(guild.id)
-        plan = self.bot.plans.plan_for(guild.id)
-        now = utcnow()
-        used = await self.bot.db.usage_for(guild.id, month_key(now))
+        tier = self.bot.plans.tier_for(guild.id)
+        allowance = await self.bot.plans.allowance(guild.id, utcnow())
         channels = await self.bot.db.help_channel_ids(guild.id)
         docs = await self.bot.kb.list_docs(guild.id)
-        quota = f"{used}/{plan.monthly_answers}" if plan.monthly_answers is not None else f"{used} (unlimited)"
+        if allowance.monthly_limit is None:
+            quota = f"{allowance.used} (unlimited)"
+        else:
+            quota = f"{allowance.used}/{allowance.monthly_limit}"
+        if allowance.credits:
+            quota += f" + {allowance.credits} top-up answers left"
         lines = [
-            f"**Plan:** {plan.name}",
-            f"**Answers this month:** {quota}",
+            f"**Plan:** {tier.name}" + (f" ({tier.price_label})" if tier.price_label else ""),
+            f"**AI answers this month:** {quota}",
             "**Help channels:** " + (", ".join(f"<#{c}>" for c in sorted(channels)) or "none"),
             f"**Knowledge base:** {len(docs)} doc(s)",
             "**Staff role:** " + (f"<@&{cfg.staff_role_id}>" if cfg.staff_role_id else "not set"),
             "**Digest:** "
             + (
                 f"<#{cfg.digest_channel_id}> at {cfg.digest_hour_utc:02d}:00 UTC"
-                + ("" if plan.digest else " (Pro only, inactive)")
+                + ("" if tier.digest else " (inactive: not included in your plan)")
                 if cfg.digest_channel_id
                 else "not set"
             ),
         ]
-        view = self.bot.plans.upsell_view() if plan.monthly_answers is not None else None
+        if tier.llm == FREE_LLM:
+            lines.append(FREE_TIER_NOTE)
+        view = self.bot.plans.upsell_view(guild.id)
         await interaction.response.send_message("\n".join(lines), view=view or discord.utils.MISSING, ephemeral=True)
+
+    @app_commands.command(name="plans", description="Compare Relay's plans and buy an upgrade or answer pack.")
+    async def plans(self, interaction: discord.Interaction) -> None:
+        plans = self.bot.plans
+        current = plans.tier_for(interaction.guild_id)
+        await interaction.response.send_message(
+            render_plans(plans.tiers, current),
+            view=plans.upsell_view(interaction.guild_id) or discord.utils.MISSING,
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="redeem", description="Apply answer packs you bought to this server.")
+    async def redeem(self, interaction: discord.Interaction) -> None:
+        now = utcnow()
+        added = 0
+        for ent in interaction.entitlements:
+            if not ent.consumed:
+                added += await self.bot.plans.redeem_topup(ent, interaction.guild_id, now) or 0
+        if added:
+            balance = await self.bot.db.credit_balance(interaction.guild_id)
+            msg = f"Added **{added}** answers to this server. Top-up balance: **{balance}**."
+        else:
+            msg = "No unredeemed answer packs found on your account. Buy one from `/relay plans` first."
+        await interaction.response.send_message(msg, ephemeral=True)
 
     @app_commands.command(name="stats", description="Questions answered, deflection rate, and time saved.")
     async def stats(self, interaction: discord.Interaction, days: app_commands.Range[int, 1, 30] = 30) -> None:

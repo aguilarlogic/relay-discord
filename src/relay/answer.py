@@ -6,7 +6,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from relay.kb import Chunk
-from relay.llm import StructuredLLM
+from relay.llm import LLMClient, LLMResult
 
 # Kept byte-stable (no per-request values) so it can be prompt-cached.
 SYSTEM_PROMPT = """\
@@ -83,17 +83,14 @@ def parse_answer(data: dict, chunks: list[Chunk]) -> AnswerResult:
     return AnswerResult(answerable=True, text=answer, source_doc_ids=tuple(doc_ids))
 
 
-class Answerer:
-    def __init__(self, llm: StructuredLLM) -> None:
-        self.llm = llm
-
-    async def answer(self, question: str, chunks: list[Chunk]) -> AnswerResult:
-        """Raises relay.llm.LLMError on API failure."""
-        if not chunks:
-            return AnswerResult(answerable=False, text="", source_doc_ids=())
-        data = await self.llm.call(
-            system=SYSTEM_PROMPT,
-            user=build_user_prompt(question, chunks),
-            schema=ANSWER_SCHEMA,
-        )
-        return parse_answer(data, chunks)
+async def answer_question(llm: LLMClient, question: str, chunks: list[Chunk]) -> tuple[AnswerResult, LLMResult]:
+    """Raises relay.llm.LLMError on API failure. Callers must pass at least
+    one chunk: with no sources there is nothing to answer from."""
+    if not chunks:
+        raise ValueError("answer_question needs at least one chunk")
+    result = await llm.call(
+        system=SYSTEM_PROMPT,
+        user=build_user_prompt(question, chunks),
+        schema=ANSWER_SCHEMA,
+    )
+    return parse_answer(result.data, chunks), result
