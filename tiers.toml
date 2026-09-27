@@ -11,7 +11,11 @@
 # - monthly_answers counts every question Relay sends to the AI (even if the
 #   AI then declines). Questions with no matching docs cost nothing and are free.
 # - llm: "free" = the FREE_LLM_* provider from .env (e.g. Gemini's free API),
-#   or a Claude model id.
+#   or a Claude model id. Helper calls (search-keyword expansion, turning staff
+#   replies into docs) use the free provider on "free" tiers and
+#   RELAY_FAST_MODEL (Haiku) on Claude tiers.
+# - kb_pages: how many pages of the server's docs website /kb sync imports.
+#   Crawling costs no AI money, so even Free gets a small taste.
 #
 # AI cost per question (see `relay costs` for your real numbers):
 #   free provider $0 · claude-haiku-4-5 ~$0.003 typical, ~$0.007 worst case
@@ -28,6 +32,7 @@ help_channels = 1
 llm = "free"
 digest = false
 kb_upload = false
+kb_pages = 10
 
 [[tier]]
 key = "starter"
@@ -40,6 +45,7 @@ help_channels = 2
 llm = "claude-haiku-4-5"
 digest = false
 kb_upload = true
+kb_pages = 50
 
 [[tier]]
 key = "pro"
@@ -52,6 +58,7 @@ help_channels = 5
 llm = "claude-sonnet-5"
 digest = true
 kb_upload = true
+kb_pages = 300
 
 [[tier]]
 key = "business"
@@ -64,6 +71,7 @@ help_channels = "unlimited"
 llm = "claude-sonnet-5"
 digest = true
 kb_upload = true
+kb_pages = 1000
 
 # One-time packs for a server that runs out mid-month. Top-up answers never
 # expire and are used after the monthly allowance, on the server's tier model.

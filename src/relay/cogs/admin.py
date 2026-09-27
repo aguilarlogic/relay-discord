@@ -46,6 +46,7 @@ def render_plans(tiers: TierConfig, current: Tier) -> str:
         features = [
             _limit(t.monthly_answers, "AI answers/month"),
             _limit(t.help_channels, "help channels", "help channel"),
+            *([f"{t.kb_pages:,} website pages synced"] if t.kb_pages else []),
             *extras,
         ]
         lines.append(f"**{t.name}** · {t.price_label or 'Free'}{marker}\n-# " + " · ".join(features))

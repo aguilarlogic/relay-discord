@@ -42,6 +42,7 @@ class Tier(BaseModel):
     llm: str  # "free" or a Claude model id
     digest: bool = False
     kb_upload: bool = False
+    kb_pages: int = Field(default=0, ge=0)  # website-sync page budget (0 = no website sync)
 
     @model_validator(mode="after")
     def _zero_sku_is_none(self) -> Tier:

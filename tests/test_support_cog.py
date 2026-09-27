@@ -3,7 +3,8 @@ from unittest.mock import MagicMock
 import discord
 
 from relay.answer import AnswerResult
-from relay.cogs.support import SupportCog, format_answer, thread_name
+from relay.cogs.support import SupportCog, format_answer, has_solved_tag, thread_name
+from relay.kb import DocRef
 from relay.support import HandleResult, Outcome
 
 
@@ -36,11 +37,27 @@ def test_question_target_forum_starter_only():
 
 
 def test_format_answer_includes_sources_and_fits():
-    result = HandleResult(Outcome.ANSWERED, 1, AnswerResult(True, "x" * 1800, (1,)), source_titles=("Refunds", "FAQ"))
+    result = HandleResult(
+        Outcome.ANSWERED,
+        1,
+        AnswerResult(True, "x" * 1800, (1,)),
+        sources=(DocRef("Refunds [v2]", None), DocRef("Solved thread", "https://discord.com/channels/1/2")),
+    )
     text = format_answer(result)
-    assert "Sources: Refunds · FAQ" in text and len(text) <= 2000
+    assert "Sources: Refunds (v2) · [Solved thread](<https://discord.com/channels/1/2>)" in text
+    assert len(text) <= 2000
 
 
 def test_thread_name():
     assert thread_name("  ") == "Question"
     assert len(thread_name("word " * 100)) == 91
+
+
+def test_has_solved_tag():
+    thread = MagicMock(spec=discord.Thread)
+    tag = MagicMock()
+    tag.name = "✅ Resolved"
+    thread.applied_tags = [tag]
+    assert has_solved_tag(thread)
+    tag.name = "Bug"
+    assert not has_solved_tag(thread)

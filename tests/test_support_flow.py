@@ -21,8 +21,10 @@ async def ask(svc, text, user_id=1, now=NOW):
     return await svc.handle_question(guild_id=1, channel_id=2, message_id=3, user_id=user_id, text=text, now=now)
 
 
-async def calls_logged(db):
-    async with db.conn.execute("SELECT tier, llm, input_tokens FROM llm_calls") as cur:
+async def calls_logged(db, purpose="answer"):
+    async with db.conn.execute(
+        "SELECT tier, llm, input_tokens FROM llm_calls WHERE purpose = ? ORDER BY id", (purpose,)
+    ) as cur:
         return [tuple(r) for r in await cur.fetchall()]
 
 
@@ -37,7 +39,7 @@ async def test_answered_path_uses_tier_model_meters_and_logs(db, kb, tiers):
         db, kb, tiers, json_response({"answerable": True, "answer": "Within 14 days.", "source_ids": [1]})
     )
     result = await ask(svc, "Can I get a refund?")
-    assert result.outcome is Outcome.ANSWERED and result.source_titles == ("Refund policy",)
+    assert result.outcome is Outcome.ANSWERED and [r.title for r in result.sources] == ["Refund policy"]
     assert (await db.get_question(result.question_id)).status == ANSWERED
     assert router.requested == ["free"]  # free tier -> free provider
     assert await db.usage_for(1, "2026-09") == 1

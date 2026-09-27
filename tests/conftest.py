@@ -30,9 +30,12 @@ class FakeMessages:
 
     responses: list[Any] = field(default_factory=list)
     calls: list[dict[str, Any]] = field(default_factory=list)
+    default: Any = None  # returned once the queue is empty (None = fail loudly)
 
     async def create(self, **kwargs: Any) -> Any:
         self.calls.append(kwargs)
+        if not self.responses and self.default is not None:
+            return self.default
         item = self.responses.pop(0)
         if isinstance(item, Exception):
             raise item
@@ -108,17 +111,30 @@ def tiers(tmp_path):
     return load_tiers(path)
 
 
-class FakeRouter:
-    """Returns one FakeAnthropic-backed ClaudeLLM for every tier key, and
-    records which keys were requested."""
+NO_EXPANSION = {"keywords": [], "language": "en"}
 
-    def __init__(self, *responses: Any) -> None:
+
+class FakeRouter:
+    """Answer calls use one FakeAnthropic-backed ClaudeLLM for every tier key
+    (recording which keys were requested); helper calls (expansion, learning)
+    use a second one, which by default returns an empty expansion."""
+
+    def __init__(self, *responses: Any, helper_responses: list[Any] | None = None) -> None:
         from relay.llm import ClaudeLLM
 
         self.client = FakeAnthropic(*responses)
+        self.helper_client = FakeAnthropic(*(helper_responses or []))
+        self.helper_client.messages.default = json_response(NO_EXPANSION, input_tokens=50, output_tokens=10)
         self.requested: list[str] = []
+        self.helper_requested: list[str] = []
         self._llm = ClaudeLLM(self.client, "claude-sonnet-5")
+        self._helper = ClaudeLLM(self.helper_client, "claude-haiku-4-5")
 
     def get(self, llm: str):
         self.requested.append(llm)
         return self._llm
+
+    def helper(self, tier_llm: str):
+        key = "free" if tier_llm == "free" else "claude-haiku-4-5"
+        self.helper_requested.append(key)
+        return key, self._helper

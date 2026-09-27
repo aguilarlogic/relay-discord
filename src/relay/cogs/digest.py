@@ -10,18 +10,24 @@ from discord import app_commands
 from discord.ext import commands, tasks
 
 from relay.bot import RelayBot
-from relay.db import DECLINED, utcnow
+from relay.cogs.kb import sync_site
+from relay.crawl import CrawlError
+from relay.db import DECLINED, iso, utcnow
 from relay.digest import build_digest, cluster_gaps, render_digest
 
 logger = logging.getLogger(__name__)
 
 RETENTION_DAYS = 30
 CALL_LOG_RETENTION_DAYS = 120
+SITE_RESYNC_HOURS = 20
 
 
 async def make_digest(bot: RelayBot, guild_id: int, now: datetime) -> str:
     questions = await bot.db.questions_since(guild_id, now - timedelta(days=1))
     digest = build_digest(questions)
+    digest.learned = await bot.kb.count_new_docs(guild_id, "learned:", iso(now - timedelta(days=1)))
+    digest.learned += await bot.kb.count_new_docs(guild_id, "thread:", iso(now - timedelta(days=1)))
+    digest.learned += await bot.kb.count_new_docs(guild_id, "message:", iso(now - timedelta(days=1)))
     declined = [q for q in questions if q.status == DECLINED]
     if declined:
         digest.gaps, usage = await cluster_gaps(bot.fast_llm, declined)
@@ -83,6 +89,20 @@ class DigestCog(commands.Cog):
             await self.bot.plans.refresh(self.bot, now)
         except discord.HTTPException:
             logger.exception("entitlement refresh failed")
+        await self.resync_sites(now)
+
+    async def resync_sites(self, now: datetime) -> None:
+        cutoff = iso(now - timedelta(hours=SITE_RESYNC_HOURS))
+        for site in await self.bot.db.sites():
+            if site["last_synced_at"] and site["last_synced_at"] > cutoff:
+                continue
+            if self.bot.get_guild(site["guild_id"]) is None:
+                continue  # bot was removed from that server
+            try:
+                await sync_site(self.bot, site["guild_id"], site["url"], now)
+            except CrawlError as e:
+                # Keep the old pages; try again next cycle.
+                logger.warning("re-sync of %s for guild %s failed: %s", site["url"], site["guild_id"], e)
 
     @digest_loop.before_loop
     @maintenance_loop.before_loop

@@ -16,7 +16,8 @@ questions using ONLY the server's documentation excerpts provided in <sources>.
 Rules:
 - If the sources clearly answer the question, set answerable=true and write a \
 concise, friendly answer (usually 1-6 sentences; short bullet lists or steps are \
-fine). Use Discord markdown. Do not greet or sign off.
+fine). Use Discord markdown. Do not greet or sign off. Write the answer in \
+the same language as the question, even if the sources are in another language.
 - If the sources do not contain the answer, or only partially/ambiguously cover \
 it, set answerable=false and leave answer empty. A wrong answer is far worse than \
 no answer: a human will pick up anything you decline.

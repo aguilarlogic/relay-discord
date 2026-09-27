@@ -209,11 +209,13 @@ class LLMRouter:
         anthropic_client: anthropic.AsyncAnthropic,
         free_llm: OpenAICompatLLM | None,
         *,
+        fast_model: str = "claude-haiku-4-5",
         effort: str | None = None,
         refusal_fallback: bool = True,
     ) -> None:
         self.anthropic_client = anthropic_client
         self.free_llm = free_llm
+        self.fast_model = fast_model
         self.effort = effort
         self.refusal_fallback = refusal_fallback
         self._claude: dict[str, ClaudeLLM] = {}
@@ -228,3 +230,10 @@ class LLMRouter:
                 self.anthropic_client, llm, effort=self.effort, refusal_fallback=self.refusal_fallback
             )
         return self._claude[llm]
+
+    def helper(self, tier_llm: str) -> tuple[str, LLMClient]:
+        """The cheap model for small helper calls (query expansion, turning a
+        staff reply into a doc): the free provider for free tiers, otherwise
+        the fast Claude model. Returns (llm key for cost logging, client)."""
+        key = "free" if tier_llm == "free" else self.fast_model
+        return key, self.get(key)

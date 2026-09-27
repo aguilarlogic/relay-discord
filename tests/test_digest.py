@@ -50,3 +50,9 @@ async def test_cluster_gaps_uses_model_and_falls_back_on_error():
     broken = FakeAnthropic(json_response({}, stop_reason="refusal"))
     gaps, usage = await cluster_gaps(ClaudeLLM(broken, "claude-haiku-4-5"), declined)
     assert len(gaps) == 5 and usage is None
+
+
+def test_digest_mentions_learned_answers():
+    digest = build_digest([])
+    digest.learned = 3
+    assert "Learned **3** new answers" in render_digest(digest, guild_id=9)

@@ -3,18 +3,45 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from relay.bot import RelayBot
+from relay.crawl import Crawler, CrawlError, normalize_url
+from relay.db import utcnow
 
 logger = logging.getLogger(__name__)
 
 MAX_UPLOAD_BYTES = 512 * 1024
 UPLOAD_EXTENSIONS = (".md", ".markdown", ".txt")
 MAX_PINS = 250
+
+
+def site_source(url: str) -> str:
+    return f"site:{url}"
+
+
+async def site_page_budget(bot: RelayBot, guild_id: int, url: str) -> int:
+    """Pages this site may use: the tier's kb_pages minus other synced sites."""
+    others = sum(s["pages"] for s in await bot.db.sites(guild_id) if s["url"] != url)
+    return max(0, bot.plans.tier_for(guild_id).kb_pages - others)
+
+
+async def sync_site(bot: RelayBot, guild_id: int, url: str, now: datetime) -> int:
+    """Crawl a docs site and replace its pages in the knowledge base.
+    Returns the number of pages stored. Raises CrawlError."""
+    budget = await site_page_budget(bot, guild_id, url)
+    if budget <= 0:
+        raise CrawlError("your plan's website page limit is used up (see /relay plans)")
+    pages = await Crawler(bot.crawl_http).crawl(url, max_pages=budget)
+    if not pages:
+        raise CrawlError("no readable pages found there")
+    stored = await bot.kb.replace_source(guild_id, site_source(url), [(p.title, p.text, p.url) for p in pages])
+    await bot.db.upsert_site(guild_id, url, stored, now)
+    return stored
 
 
 class AddDocModal(discord.ui.Modal, title="Add to Relay's knowledge base"):
@@ -110,6 +137,57 @@ class KBCog(commands.GroupCog, group_name="kb", group_description="Manage Relay'
             interaction.guild_id, doc_title, "\n\n".join(parts), source=f"pins:{channel.id}"
         )
         await interaction.followup.send(f"Imported {len(parts)} pins as doc `#{doc_id}` ({n} chunks).", ephemeral=True)
+
+    @app_commands.command(name="sync", description="Import your docs website; Relay re-syncs it daily.")
+    @app_commands.describe(url="Start page, e.g. https://example.com/docs/ (pages under it are included)")
+    async def sync(self, interaction: discord.Interaction, url: str) -> None:
+        root = normalize_url(url)
+        if root is None:
+            await interaction.response.send_message("Use a full `https://` URL.", ephemeral=True)
+            return
+        tier = self.bot.plans.tier_for(interaction.guild_id)
+        if tier.kb_pages <= 0:
+            await interaction.response.send_message(
+                "Website sync isn't included in your plan. See `/relay plans`.",
+                view=self.bot.plans.upsell_view(interaction.guild_id, include_topups=False) or discord.utils.MISSING,
+                ephemeral=True,
+            )
+            return
+        await interaction.response.defer(ephemeral=True, thinking=True)
+        try:
+            stored = await sync_site(self.bot, interaction.guild_id, root, utcnow())
+        except CrawlError as e:
+            await interaction.followup.send(f"Couldn't sync {root}: {e}.", ephemeral=True)
+            return
+        budget = await site_page_budget(self.bot, interaction.guild_id, root)
+        note = " (reached your plan's page limit; upgrade for more)" if stored >= budget else ""
+        await interaction.followup.send(
+            f"Imported **{stored}** page{'s' * (stored != 1)} from <{root}>{note}. Relay re-syncs it daily.",
+            ephemeral=True,
+        )
+
+    @app_commands.command(name="sites", description="List synced websites.")
+    async def sites(self, interaction: discord.Interaction) -> None:
+        sites = await self.bot.db.sites(interaction.guild_id)
+        tier = self.bot.plans.tier_for(interaction.guild_id)
+        if not sites:
+            msg = "No synced websites. Add one with `/kb sync`."
+        else:
+            used = sum(s["pages"] for s in sites)
+            lines = [f"<{s['url']}> · {s['pages']} pages · synced {s['last_synced_at'] or 'never'}" for s in sites]
+            msg = "\n".join(lines) + f"\n-# {used}/{tier.kb_pages} pages used on the {tier.name} plan"
+        await interaction.response.send_message(msg[:2000], ephemeral=True)
+
+    @app_commands.command(name="sync-remove", description="Stop syncing a website and remove its pages.")
+    async def sync_remove(self, interaction: discord.Interaction, url: str) -> None:
+        root = normalize_url(url) or url
+        removed = await self.bot.kb.remove_source(interaction.guild_id, site_source(root))
+        had_site = await self.bot.db.remove_site(interaction.guild_id, root)
+        if had_site or removed:
+            msg = f"Removed <{root}> and its {removed} page{'s' * (removed != 1)}."
+        else:
+            msg = "That website isn't synced. See `/kb sites`."
+        await interaction.response.send_message(msg, ephemeral=True)
 
     @app_commands.command(name="list", description="List the docs Relay answers from.")
     async def list_docs(self, interaction: discord.Interaction) -> None:

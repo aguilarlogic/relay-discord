@@ -71,6 +71,7 @@ class Digest:
     escalated: list[Question] = field(default_factory=list)
     unanswered: list[Question] = field(default_factory=list)
     gaps: list[GapTopic] = field(default_factory=list)
+    learned: int = 0  # docs Relay learned from staff in the period
 
 
 GAP_SYSTEM = """\
@@ -170,12 +171,20 @@ def render_stats(stats: Stats, days: int) -> str:
 def render_digest(digest: Digest, guild_id: int) -> str:
     s = digest.stats
     lines = ["## Relay daily digest", *(_stats_lines(s) if s.total else ["Quiet day: no questions."])]
+    if digest.learned:
+        lines.append(
+            f"🧠 Learned **{digest.learned}** new answer{'s' * (digest.learned != 1)} from staff replies. "
+            "Relay will handle those questions itself from now on."
+        )
     if digest.escalated:
         lines.append("\n**🙋 Handed to staff**")
         for q in digest.escalated[:MAX_LISTED]:
             lines.append(f"- [{_clip(q.text, 90)}]({jump_url(guild_id, q)})")
     if digest.gaps:
-        lines.append("\n**📚 Docs to write** (questions Relay couldn't answer)")
+        lines.append(
+            "\n**📚 Docs to write** (questions Relay couldn't answer; answer one in its thread and press "
+            "**Save as answer** to teach Relay)"
+        )
         for g in digest.gaps:
             lines.append(f"- **{g.topic}** ×{g.count} — e.g. “{g.example}”")
     elif digest.unanswered:

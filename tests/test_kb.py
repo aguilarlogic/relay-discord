@@ -1,6 +1,6 @@
 import pytest
 
-from relay.kb import MAX_DOC_CHARS, build_fts_query, chunk_text
+from relay.kb import MAX_DOC_CHARS, DocRef, build_fts_query, chunk_text
 
 
 def test_chunk_text_keeps_paragraphs_and_respects_limit():
@@ -69,8 +69,38 @@ async def test_add_doc_validation(kb):
         await kb.add_doc(1, "Huge", "x" * (MAX_DOC_CHARS + 1), "manual")
 
 
-async def test_doc_titles(kb):
+async def test_doc_refs(kb):
     a, _ = await kb.add_doc(1, "A", "alpha text", "manual")
-    b, _ = await kb.add_doc(1, "B", "beta text", "manual")
-    assert await kb.doc_titles(1, [a, b]) == {a: "A", b: "B"}
-    assert await kb.doc_titles(2, [a]) == {}
+    b, _ = await kb.add_doc(1, "B", "beta text", "thread:9", url="https://discord.com/channels/1/9")
+    refs = await kb.doc_refs(1, [a, b])
+    assert refs[a] == DocRef("A", None) and refs[b] == DocRef("B", "https://discord.com/channels/1/9")
+    assert await kb.doc_refs(2, [a]) == {}
+
+
+async def test_replace_source_swaps_docs_atomically(kb):
+    await kb.add_doc(1, "Old page", "old refund text", "site:https://x.dev/")
+    await kb.add_doc(1, "Manual", "manual refund text", "manual")
+    added = await kb.replace_source(
+        1, "site:https://x.dev/", [("New A", "new refund text", "https://x.dev/a"), ("Empty", "  ", None)]
+    )
+    assert added == 1
+    titles = sorted(d.title for d in await kb.list_docs(1))
+    assert titles == ["Manual", "New A"]
+    assert all(c.title != "Old page" for c in await kb.search(1, "refund"))
+    assert await kb.has_source(1, "site:https://x.dev/") and not await kb.has_source(2, "site:https://x.dev/")
+    assert await kb.remove_source(1, "site:https://x.dev/") == 1
+    assert await kb.search(1, "new") == []
+
+
+async def test_extra_terms_find_paraphrased_doc(kb):
+    await kb.add_doc(1, "Refund policy", "Refunds are available within 14 days.", "manual")
+    assert await kb.search(1, "can I get my money back?") == []
+    hits = await kb.search(1, "can I get my money back?", extra_terms=["refund"])
+    assert hits and hits[0].title == "Refund policy"
+
+
+async def test_count_new_docs(kb):
+    await kb.add_doc(1, "A", "alpha", "learned:5")
+    await kb.add_doc(1, "B", "beta", "manual")
+    assert await kb.count_new_docs(1, "learned:", "2000-01-01") == 1
+    assert await kb.count_new_docs(1, "learned:", "2999-01-01") == 0

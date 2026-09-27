@@ -90,6 +90,21 @@ MIGRATIONS: list[str] = [
     );
     CREATE INDEX llm_calls_created ON llm_calls (created_at);
     """,
+    # 3: learning from staff / solved threads, and website sync
+    """
+    ALTER TABLE questions ADD COLUMN thread_id INTEGER;
+    CREATE INDEX questions_thread ON questions (thread_id);
+    CREATE INDEX questions_message ON questions (message_id);
+    ALTER TABLE kb_docs ADD COLUMN url TEXT;
+    CREATE INDEX kb_docs_source ON kb_docs (guild_id, source);
+    CREATE TABLE kb_sites (
+        guild_id INTEGER NOT NULL,
+        url TEXT NOT NULL,
+        pages INTEGER NOT NULL DEFAULT 0,
+        last_synced_at TEXT,
+        PRIMARY KEY (guild_id, url)
+    );
+    """,
 ]
 
 # Question lifecycle. "answered" is the state right after the bot posts; the
@@ -131,6 +146,7 @@ class Question:
     source_doc_ids: tuple[int, ...]
     created_at: str
     resolved_at: str | None
+    thread_id: int | None = None
 
 
 def _row_to_question(row: aiosqlite.Row) -> Question:
@@ -146,6 +162,7 @@ def _row_to_question(row: aiosqlite.Row) -> Question:
         source_doc_ids=ids,
         created_at=row["created_at"],
         resolved_at=row["resolved_at"],
+        thread_id=row["thread_id"],
     )
 
 
@@ -238,13 +255,14 @@ class Database:
         text: str,
         status: str,
         source_doc_ids: Iterable[int] = (),
+        thread_id: int | None = None,
         now: datetime | None = None,
     ) -> int:
         if status not in STATUSES:
             raise ValueError(f"bad status {status!r}")
         cur = await self.conn.execute(
             "INSERT INTO questions (guild_id, channel_id, message_id, user_id, text, status,"
-            " source_doc_ids, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            " source_doc_ids, thread_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 guild_id,
                 channel_id,
@@ -253,6 +271,7 @@ class Database:
                 text,
                 status,
                 ",".join(str(i) for i in source_doc_ids),
+                thread_id,
                 iso(now or utcnow()),
             ),
         )
@@ -275,6 +294,25 @@ class Database:
         )
         await self.conn.commit()
         return cur.rowcount > 0
+
+    async def set_question_thread(self, question_id: int, thread_id: int) -> None:
+        await self.conn.execute("UPDATE questions SET thread_id = ? WHERE id = ?", (thread_id, question_id))
+        await self.conn.commit()
+
+    async def find_unanswered_question(
+        self, guild_id: int, *, thread_id: int | None = None, message_id: int | None = None
+    ) -> Question | None:
+        """The most recent question Relay couldn't close (declined or handed to
+        staff) that lives in thread_id or was posted as message_id."""
+        if thread_id is None and message_id is None:
+            return None
+        async with self.conn.execute(
+            "SELECT * FROM questions WHERE guild_id = ? AND status IN (?, ?)"
+            " AND (thread_id = ? OR message_id = ?) ORDER BY id DESC LIMIT 1",
+            (guild_id, DECLINED, ESCALATED, thread_id, message_id),
+        ) as cur:
+            row = await cur.fetchone()
+        return _row_to_question(row) if row else None
 
     async def questions_since(self, guild_id: int, since: datetime) -> list[Question]:
         async with self.conn.execute(
@@ -382,3 +420,27 @@ class Database:
         cur = await self.conn.execute("DELETE FROM llm_calls WHERE created_at < ?", (iso(cutoff),))
         await self.conn.commit()
         return cur.rowcount
+
+    # --- synced websites ---------------------------------------------------
+
+    async def upsert_site(self, guild_id: int, url: str, pages: int, now: datetime) -> None:
+        await self.conn.execute(
+            "INSERT INTO kb_sites (guild_id, url, pages, last_synced_at) VALUES (?, ?, ?, ?)"
+            " ON CONFLICT (guild_id, url) DO UPDATE SET pages = excluded.pages,"
+            " last_synced_at = excluded.last_synced_at",
+            (guild_id, url, pages, iso(now)),
+        )
+        await self.conn.commit()
+
+    async def sites(self, guild_id: int | None = None) -> list[dict]:
+        if guild_id is None:
+            query, args = "SELECT * FROM kb_sites ORDER BY guild_id, url", ()
+        else:
+            query, args = "SELECT * FROM kb_sites WHERE guild_id = ? ORDER BY url", (guild_id,)
+        async with self.conn.execute(query, args) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def remove_site(self, guild_id: int, url: str) -> bool:
+        cur = await self.conn.execute("DELETE FROM kb_sites WHERE guild_id = ? AND url = ?", (guild_id, url))
+        await self.conn.commit()
+        return cur.rowcount > 0

@@ -1,22 +1,37 @@
 # Relay
 
-**An AI support desk for Discord communities.** Relay answers the questions your
-staff answer twenty times a day, using only your own docs. It hands anything it
-isn't sure about to a human, and every morning it tells you which docs are
-missing.
+**The Discord support bot that learns from your staff.** Relay answers your
+members' repeat questions from your own docs, website, and past answers. When
+it can't answer, a moderator does, then presses **📚 Save as answer**, and from
+then on Relay answers that question itself. It's sold inside Discord, from $4.99/month.
 
 Built for servers where support costs real staff time: game studios, SaaS and
 open-source projects, and creators with big communities.
+
+## Why Relay instead of other AI support bots
+
+| | Relay | Mava | kapa.ai | Chatbot builders (Quickchat, Chat Data, …) |
+|---|---|---|---|---|
+| Price | Free; paid plans **$4.99–$59.99/mo** | Free tier (30 requests), then $99–$199+/mo | ~$250+/mo, sales call | Separate SaaS subscription |
+| Buy it | **Inside Discord** (Premium Apps) | Their website | Sales call | Their website |
+| Learns from staff replies | **One click, or automatically from solved forum posts** | – | – | – |
+| Stays quiet unless the docs support an answer | ✓ | configurable | ✓ | usually chats anyway |
+| Tells you which docs to write | **Daily "docs to write" digest** | analytics dashboard | analytics dashboard | varies |
+
+Competitor pricing comes from public pages as of September 2026; check them before quoting.
 
 ## What it does
 
 | | |
 |---|---|
-| **Auto-answers** | New posts in your help channels or forums get an answer in a thread within seconds, citing the docs it used. |
-| **Knows when to stay quiet** | Relay only answers from your knowledge base. No match means no reply, so staff pick it up as usual. A wrong answer is worse than no answer. |
+| **Auto-answers** | New posts in your help channels or forums get an answer in a thread within seconds, with linked sources. |
+| **Learns from staff** | When staff reply to a question Relay couldn't answer, a **📚 Save as answer** button turns the reply into a doc. Tag a forum post *Solved* and Relay learns the thread. Right-click any message and choose **Apps → Save to Relay docs**. |
+| **Syncs your website** | `/kb sync https://yoursite.com/docs/` imports your docs site and re-syncs it daily. Setup takes two minutes. |
+| **Understands paraphrases and other languages** | "Can I get my money back?" finds your *Refund policy*. Questions in Spanish, German, and other languages are answered in the asker's language from English docs. |
+| **Knows when to stay quiet** | Relay only answers from your knowledge base. No match means no reply, and staff pick it up as usual. |
 | **Clean hand-off** | Every answer has **✅ Solved** and **🙋 Need a human** buttons. "Need a human" pings your staff role in the thread. |
-| **Daily staff digest** | Posts what was escalated, what went unanswered, and **the docs you should write**: unanswered questions grouped into topics. |
-| **Proves its value** | `/relay stats` shows questions answered, deflection rate, and estimated staff hours saved. |
+| **Daily staff digest** | What was escalated, what went unanswered, **the docs you should write**, and how many answers Relay learned. |
+| **Proves its value** | `/relay stats` shows the deflection rate and estimated staff hours saved. |
 
 ## Plans (per server)
 
@@ -28,6 +43,8 @@ tier uses, and the answer packs can all be changed there without touching code.
 | Price | Free | $4.99/mo | $19.99/mo | $59.99/mo |
 | AI answers / month | 50 | 300 | 750 | 2,000 |
 | Help channels / forums | 1 | 2 | 5 | Unlimited |
+| Website sync (`/kb sync`) | 10 pages | 50 pages | 300 pages | 1,000 pages |
+| Learn from staff / solved threads | ✓ | ✓ | ✓ | ✓ |
 | AI | Free third-party API (Gemini by default) | Claude Haiku | Claude Sonnet | Claude Sonnet |
 | Knowledge base (`/kb add`, `/kb import-pins`) | ✓ | ✓ | ✓ | ✓ |
 | File import (`/kb upload`) | | ✓ | ✓ | ✓ |
@@ -100,7 +117,12 @@ right away. Global commands can take a while to propagate.
 /relay channel-add channel:#help          (a text channel or a forum)
 /kb add                                   (paste an FAQ, policy, or guide)
 /kb import-pins channel:#faq              (turn existing pinned answers into docs)
+/kb sync url:https://example.com/docs/    (import your docs website; re-synced daily)
 ```
+
+To let Relay learn from forum posts, give your help forum a tag named
+**Solved** (or *Resolved*, *Answered*, *Fixed*). When staff apply it to a post
+they answered, Relay saves the answer.
 
 Then post a question in `#help` from a non-staff account.
 
@@ -142,6 +164,9 @@ thin, lower its `monthly_answers`, move it to a cheaper model, or raise the pric
 | `/relay redeem` | Manage Server | Apply answer packs you bought to this server |
 | `/relay stats [days]` | Manage Server | Deflection rate and estimated time saved |
 | `/kb add` · `upload` · `import-pins` · `list` · `remove` | Manage Server | Manage the knowledge base |
+| `/kb sync url` · `sites` · `sync-remove` | Manage Server | Import a docs website (re-synced daily) |
+| **Apps → Save to Relay docs** (right-click a message) | Staff (staff role or Manage Server) | Turn any message into a doc |
+| **📚 Save as answer** button | Staff | Appears when staff reply to a question Relay couldn't answer |
 | `/digest-now` | Manage Server | Preview today's digest (Pro and Business) |
 
 ## How it works
@@ -155,6 +180,19 @@ thin, lower its `monthly_answers`, move it to a cheaper model, or raise the pric
   provider uses `response_format` plus the schema in the prompt, and its output
   is parsed leniently. The digest's topic grouping uses `RELAY_FAST_MODEL`
   (default `claude-haiku-4-5`).
+- **Paraphrases and languages:** when plain keyword search finds fewer than 2
+  matching chunks, a cheap model (the free provider on Free, Haiku on paid plans)
+  rewrites the question into English search keywords, and Relay searches again.
+  This helper call is logged in `relay costs` but doesn't count against the
+  answer allowance.
+- **Learning:** the same cheap model rewrites a staff reply into a standalone
+  FAQ entry, using only what staff actually said. Replies like "let me check"
+  are rejected. Learned docs link back to the original message or thread, so
+  answers built on them show "Sources: [thread](link)".
+- **Website sync:** same-host pages under the start URL only, https only,
+  robots.txt respected, 1 MB and 10 s per page, sequential. The crawler can only
+  connect to public IP addresses (checked at connection time), so it can't be
+  pointed at private networks. Re-syncs replace the site's old pages atomically.
 - **Skipped messages:** Relay never replies to bots, to members with the staff role (or
   Manage Server), to messages under 15 characters, to follow-up messages inside
   threads, or to someone who asked less than 60 s ago.
@@ -172,7 +210,10 @@ servers this, and why paid tiers use Claude.
 
 Relay stores question text in its local SQLite database for the digest and stats
 and deletes it after 30 days. The per-call token log contains no message content
-and is kept for 120 days. It does not store other channel messages.
+and is kept for 120 days. It does not store other channel messages, except
+the staff replies and solved threads that staff explicitly save as docs, and pages
+from websites a server chooses to sync. Both stay until removed with `/kb remove`
+or `/kb sync-remove`.
 
 ### Troubleshooting
 
@@ -209,7 +250,10 @@ services.
 4. Press **Need a human**. The staff role should be pinged and the buttons removed.
 5. Post an unrelated question. There should be no reply.
 6. Run `/relay stats`, then `/digest-now`. The unrelated question should show up under "Docs to write" or "Unanswered".
-7. Monetized setup: in a test server with no subscription, check that answers come from the free provider (the `relay costs` tier shows `free`). Buy a tier with a test account; `/relay status` should show the new plan on the next command. Buy a pack, run `/relay redeem`, and check the balance in `/relay status`.
+7. Post a question the docs don't cover. As staff, reply to it (in its thread, or with Discord's reply). Press **📚 Save as answer**, then ask the same question in other words from another account. Relay should now answer it, linking the staff reply.
+8. Run `/kb sync` on a real docs site, then `/kb sites`. Ask something only the site covers.
+9. Ask a question in another language. The answer should come back in that language.
+10. Monetized setup: in a test server with no subscription, check that answers come from the free provider (the `relay costs` tier shows `free`). Buy a tier with a test account; `/relay status` should show the new plan on the next command. Buy a pack, run `/relay redeem`, and check the balance in `/relay status`.
 
 ---
 

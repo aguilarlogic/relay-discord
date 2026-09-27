@@ -11,13 +11,14 @@ from discord import app_commands
 from discord.ext import commands
 
 from relay.config import Settings
+from relay.crawl import make_crawl_session
 from relay.db import Database, utcnow
 from relay.kb import KnowledgeBase
 from relay.llm import ClaudeLLM, LLMRouter, OpenAICompatLLM
 from relay.plans import PlanService, month_key
 from relay.support import SupportService
 from relay.tiers import FREE_LLM, load_tiers
-from relay.views import QuestionButton
+from relay.views import LearnButton, QuestionButton
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +41,7 @@ class RelayBot(commands.Bot):
     router: LLMRouter
     fast_llm: ClaudeLLM
     http: aiohttp.ClientSession
+    crawl_http: aiohttp.ClientSession
 
     def __init__(self, settings: Settings) -> None:
         intents = discord.Intents.default()
@@ -59,6 +61,7 @@ class RelayBot(commands.Bot):
         tiers = load_tiers(s.relay_tiers_path)
         self.db = await Database.open(s.database_path)
         self.http = aiohttp.ClientSession()
+        self.crawl_http = make_crawl_session()  # public IPs only: crawl URLs come from users
         # api_key=None lets the SDK fall back to its own credential resolution.
         claude = anthropic.AsyncAnthropic(api_key=s.anthropic_api_key)
         free_llm = None
@@ -72,14 +75,20 @@ class RelayBot(commands.Bot):
             )
         elif any(t.llm == FREE_LLM for t in tiers.tier):
             logger.warning("a tier uses llm='free' but FREE_LLM_MODEL is not set: those servers get no answers")
-        self.router = LLMRouter(claude, free_llm, effort=s.relay_effort, refusal_fallback=s.relay_refusal_fallback)
+        self.router = LLMRouter(
+            claude,
+            free_llm,
+            fast_model=s.relay_fast_model,
+            effort=s.relay_effort,
+            refusal_fallback=s.relay_refusal_fallback,
+        )
         self.fast_llm = ClaudeLLM(claude, s.relay_fast_model, refusal_fallback=False)
         self.kb = KnowledgeBase(self.db)
         self.plans = PlanService(self.db, tiers)
         self.support = SupportService(self.db, self.kb, self.plans, self.router)
         self.help_channel_ids = await self.db.all_help_channel_ids()
 
-        self.add_dynamic_items(QuestionButton)
+        self.add_dynamic_items(QuestionButton, LearnButton)
         for cog in COGS:
             await self.load_extension(cog)
 
@@ -94,8 +103,9 @@ class RelayBot(commands.Bot):
 
     async def close(self) -> None:
         await super().close()
-        if hasattr(self, "http"):
-            await self.http.close()
+        for session in ("http", "crawl_http"):
+            if hasattr(self, session):
+                await getattr(self, session).close()
         if hasattr(self, "db"):
             await self.db.close()
 
