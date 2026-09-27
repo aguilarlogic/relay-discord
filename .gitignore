@@ -11,8 +11,8 @@ wheels/
 
 # Secrets and local state
 .env
-*.json
-!*.example.json
 data/
+*.db
+*.db-wal
+*.db-shm
 *.log
-

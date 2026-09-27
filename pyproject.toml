@@ -1,17 +1,14 @@
 [project]
-name = "pumpbot"
+name = "relay"
 version = "0.1.0"
-description = "pump.fun new-mint sniper bot (v1, instrumentation-scale)"
+description = "Relay: an AI support desk for Discord communities that answers from your own docs"
 readme = "README.md"
 requires-python = "==3.12.*"
 dependencies = [
-    "solders>=0.28,<0.30",
-    "solana>=0.40",
-    "websockets>=13",
-    "httpx>=0.27",
+    "discord.py>=2.4",
+    "anthropic>=1.0",
+    "aiosqlite>=0.20",
     "pydantic-settings>=2.4",
-    "pyyaml>=6.0",
-    "base58>=2.1",
 ]
 
 [project.optional-dependencies]
@@ -22,8 +19,18 @@ dev = [
 ]
 
 [project.scripts]
-pumpbot = "pumpbot.main:run"
+relay = "relay.__main__:main"
 
 [build-system]
-requires = ["uv_build>=0.12.0,<0.13.0"]
+requires = ["uv_build>=0.8.0,<0.13.0"]
 build-backend = "uv_build"
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
